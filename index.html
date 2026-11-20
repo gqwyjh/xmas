@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#020409">
+<title>给我的 BFF</title>
+<style>
+  html, body { margin:0; padding:0; height:100%; background:#020409; overflow:hidden;
+    -webkit-tap-highlight-color: transparent; }
+  #wrap { position:fixed; inset:0; }
+  canvas#c { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  video#v { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; display:none; background:#000; }
+  #hint {
+    position:absolute; left:0; right:0; bottom:9%;
+    text-align:center; color:#fff; opacity:0; transition:opacity 1.2s ease;
+    font:400 15px/1.6 "PingFang SC","Microsoft YaHei",sans-serif;
+    letter-spacing:.18em; pointer-events:none;
+    text-shadow:0 0 12px rgba(150,190,255,.6);
+  }
+  #hint.on { opacity:.62; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <video id="v" muted playsinline webkit-playsinline loop preload="auto"></video>
+  <div id="hint"></div>
+</div>
+<audio id="bgm" loop preload="auto"></audio>
+
+<script>
+(function () {
+  "use strict";
+
+  // ============ 素材（单文件版会被替换成 data URI） ============
+  var ASSETS = {
+    video: "assets/meteor.mp4",
+    audio: "assets/track.mp3",
+    prince: "assets/prince.png"
+  };
+
+  var cvs = document.getElementById("c");
+  var ctx = cvs.getContext("2d");
+  var vid = document.getElementById("v");
+  var bgm = document.getElementById("bgm");
+  var hintEl = document.getElementById("hint");
+
+  var W = 0, H = 0, DPR = 1;
+  var scene = 1;          // 1=树  2=流星雨  3=小王子
+  var T0 = 0;             // 本幕开始时刻(ms)
+  var hintTimer = 0;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    cvs.width = Math.round(W * DPR);
+    cvs.height = Math.round(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  window.addEventListener("resize", function () { resize(); layout_prince(); });
+  resize();
+
+  function now() { return performance.now(); }
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function gauss() { return (Math.random() + Math.random() + Math.random() - 1.5) / 1.5; }
+
+  // ==================== 第一幕：螺旋圣诞树 ====================
+  var CAM_DIST = 13, CAM_HEIGHT = 6.0, PITCH = -0.28, TREE_HEIGHT = 12.0;
+  var TREE_N = 5200, GROUND_N = 1200, HEART_N = 600;
+  var ASSEMBLE_DELAY = 2.8, ASSEMBLE_DUR_MIN = 2.0, ASSEMBLE_DUR_MAX = 3.6;
+  var ASM_TOTAL = ASSEMBLE_DELAY + ASSEMBLE_DUR_MAX;
+
+  var tree = [], ground = [], heart = [], asm = [];
+  var heartCenterY = TREE_HEIGHT + 0.4 + 0.45;
+  var heartScreen = { x: 0, y: 0, r: 60 };
+
+  function genAll() {
+    // 树：螺旋光带
+    for (var i = 0; i < TREE_N; i++) {
+      var u = Math.random(), h = Math.pow(u, 1.15);
+      var y = TREE_HEIGHT * h + 0.2;
+      var baseR = Math.pow(1 - h, 1.05) * 3.4;
+      var ang = u * 9.5 * Math.PI * 2 + gauss() * 0.10;
+      var r = baseR * rand(0.95, 1.03);
+      var g = Math.random();
+      tree.push({ x: Math.cos(ang) * r, y: y, z: Math.sin(ang) * r,
+                  c: [150 + 60 * g, 205 + 35 * g, 255] });
+    }
+    // 地面
+    for (var j = 0; j < GROUND_N; j++) {
+      var rr = Math.random();
+      var rad = 2.0 + 12.0 * Math.pow(rr, 1.8);
+      var th = Math.random() * Math.PI * 2;
+      var fade = 1 - Math.min(1, (rad - 2) / 12);
+      ground.push({
+        x: Math.cos(th) * rad, y: -0.3 + rand(-0.15, 0.15), z: Math.sin(th) * rad,
+        c: (Math.random() < 0.18)
+          ? [200 + 40 * fade, 235 + 18 * fade, 255]
+          : [130 + 70 * fade, 190 + 50 * fade, 235 + 20 * fade]
+      });
+    }
+    // 树顶的紫心
+    var topY = TREE_HEIGHT + 0.4;
+    while (heart.length < HEART_N) {
+      var hx = rand(-1.3, 1.3), hy = rand(-1.4, 1.4);
+      var f = Math.pow(hx * hx + hy * hy - 1, 3) - hx * hx * Math.pow(hy, 3);
+      if (f > 0) continue;
+      var dist = Math.hypot(hx, hy);
+      var core = Math.max(0, 1 - dist);
+      heart.push({
+        x: hx * 0.55, y: topY + (hy + 1) * 0.45, z: rand(-0.16, 0.16),
+        c: [Math.min(255, 150 + 105 * core), Math.min(255, 120 + 120 * core), Math.min(255, 235 + 20 * core)]
+      });
+    }
+    // 汇聚成形：给每个点一个远处的起点
+    var all = tree.concat(ground, heart);
+    for (var k = 0; k < all.length; k++) {
+      var p = all[k];
+      var dx = rand(-1, 1), dy = rand(-1, 1), dz = rand(-1, 1);
+      var n = Math.sqrt(dx * dx + dy * dy + dz * dz) || 1;
+      var d = rand(16, 42) * (H / 900);
+      asm.push({
+        sx: p.x + dx / n * d, sy: p.y + dy / n * d + rand(2, 8), sz: p.z + dz / n * d,
+        tx: p.x, ty: p.y, tz: p.z, c: p.c,
+        delay: rand(0, ASSEMBLE_DELAY), dur: rand(ASSEMBLE_DUR_MIN, ASSEMBLE_DUR_MAX)
+      });
+    }
+  }
+
+  function proj(x, y, z, ca, sa, cp, sp) {
+    var xz = x * ca - z * sa;
+    var zz = x * sa + z * ca;
+    var yp = y * cp - zz * sp - CAM_HEIGHT;
+    var zp = y * sp + zz * cp + CAM_DIST;
+    if (zp <= 0.1) return null;
+    var f = (H * 0.62) / zp;
+    return { x: W / 2 + xz * f, y: H / 2 - yp * f, z: zp, f: f };
+  }
+
+  function easeOut(p) { return 1 - Math.pow(1 - p, 3); }
+
+  function drawTree(angle, elapsed, tapping) {
+    var ca = Math.cos(angle), sa = Math.sin(angle);
+    var cp = Math.cos(PITCH), sp = Math.sin(PITCH);
+
+    // 背景星星
+    for (var i = 0; i < starField.length; i++) {
+      var s = starField[i];
+      var tw = 0.55 + 0.45 * Math.sin(elapsed * 2 + s.p);
+      var c = Math.round(200 * s.b * tw);
+      ctx.fillStyle = "rgb(" + c + "," + c + "," + Math.min(255, c + 18) + ")";
+      ctx.fillRect(s.x * W, s.y * H, 1.4, 1.4);
+    }
+
+    var assembling = elapsed < ASM_TOTAL;
+    var list = [];
+
+    if (assembling) {
+      for (var j = 0; j < asm.length; j++) {
+        var a = asm[j];
+        var p = (elapsed - a.delay) / a.dur;
+        if (p <= 0) continue;
+        if (p > 1) p = 1;
+        var e = easeOut(p);
+        var x = a.sx + (a.tx - a.sx) * e;
+        var y = a.sy + (a.ty - a.sy) * e;
+        var z = a.sz + (a.tz - a.sz) * e;
+        var q = proj(x, y, z, ca, sa, cp, sp);
+        if (!q) continue;
+        if (q.x < -20 || q.x > W + 20 || q.y < -20 || q.y > H + 20) continue;
+        var b = 0.3 + 0.7 * e;
+        list.push([q.z, q.x, q.y, [a.c[0] * b, a.c[1] * b, a.c[2] * b]]);
+      }
+    } else {
+      for (var t = 0; t < tree.length; t++) pushPoint(list, tree[t], ca, sa, cp, sp, 1);
+      for (var g = 0; g < ground.length; g++) pushPoint(list, ground[g], ca, sa, cp, sp, 1);
+      // 爱心：忽明忽暗，暗示可以点
+      var pulse = 0.45 + 0.55 * (0.5 + 0.5 * Math.sin(elapsed * 3.1));
+      for (var hh = 0; hh < heart.length; hh++) pushPoint(list, heart[hh], ca, sa, cp, sp, pulse);
+    }
+
+    list.sort(function (A, B) { return B[0] - A[0]; });
+    for (var k = 0; k < list.length; k++) {
+      var it = list[k];
+      ctx.fillStyle = "rgb(" + (it[3][0] | 0) + "," + (it[3][1] | 0) + "," + (it[3][2] | 0) + ")";
+      var sz = it[0] < 6 ? 2 : 1.6;
+      ctx.fillRect(it[1], it[2], sz, sz);
+    }
+
+    // 计算爱心的屏幕位置（点击判定用）
+    var hp = proj(0, heartCenterY, 0, ca, sa, cp, sp);
+    if (hp) {
+      heartScreen.x = hp.x;
+      heartScreen.y = hp.y;
+      heartScreen.r = Math.max(46, hp.f * 0.75);
+      if (!assembling) {
+        var g2 = ctx.createRadialGradient(hp.x, hp.y, 0, hp.x, hp.y, heartScreen.r * 1.6);
+        g2.addColorStop(0, "rgba(150,120,255,0.20)");
+        g2.addColorStop(1, "rgba(150,120,255,0)");
+        ctx.fillStyle = g2;
+        ctx.beginPath();
+        ctx.arc(hp.x, hp.y, heartScreen.r * 1.6, 0, 6.2832);
+        ctx.fill();
+      }
+    }
+  }
+
+  function pushPoint(list, p, ca, sa, cp, sp, mul) {
+    var q = proj(p.x, p.y, p.z, ca, sa, cp, sp);
+    if (!q) return;
+    if (q.x < -8 || q.x > W + 8 || q.y < -8 || q.y > H + 8) return;
+    list.push([q.z, q.x, q.y, [p.c[0] * mul, p.c[1] * mul, p.c[2] * mul]]);
+  }
+
+  var starField = [];
+  function makeStars() {
+    starField.length = 0;
+    var n = Math.round(W * H / 9000);
+    for (var i = 0; i < n; i++) {
+      starField.push({ x: Math.random(), y: Math.random() * 0.95, p: rand(0, 6.28), b: rand(0.4, 1) });
+    }
+  }
+
+  // ==================== 第三幕：小王子 + 粒子文字 ====================
+  var TEXTS = ["MY BFF", "LOOK UP AT THE", "STARRY SKY", "ARE YOU",
+               "LOOKING AT THE", "SAME STAR", "WITH ME ?", "HAPPY",
+               "HOLIDAY", "I MISS YOU"];
+  var P_NUM = 900;
+  var particles = [];
+  var princeImg = null, princePos = { x: 0, y: 0, w: 0, h: 0 };
+  var textIndex = 0, targets = [];
+
+  function makeParticles() {
+    particles.length = 0;
+    for (var i = 0; i < P_NUM; i++) {
+      particles.push({
+        x: rand(0, W), y: rand(0, H), mx: 0, my: 0,
+        op: 0, size: Math.random() < 0.35 ? 2 : 1.4
+      });
+    }
+    for (var j = 0; j < particles.length; j++) {
+      particles[j].mx = particles[j].x;
+      particles[j].my = particles[j].y;
+    }
+  }
+
+  function layout_prince() {
+    if (!princeImg || !princeImg.width) return;
+    // 按高度铺，宽度允许超出屏幕两侧（地平线正好撑满，人物落在中间）
+    var ph = H * 0.34;
+    var pw = princeImg.width * ph / princeImg.height;
+    princePos = { x: (W - pw) / 2, y: H - ph, w: pw, h: ph };
+  }
+
+  function loadPrince() {
+    var img = new Image();
+    img.onload = function () { princeImg = img; layout_prince(); };
+    img.src = ASSETS.prince;
+  }
+
+  var off = document.createElement("canvas");
+  var offc = off.getContext("2d");
+
+  function computeTargets(text) {
+    // 字号：先按高度定，再按宽度收——窄屏上长句子必须缩，不然会被屏幕切掉
+    var maxW = W - 24;
+    var fs = Math.max(26, Math.min(H * 0.115, W * 0.2));
+    var font = "", tw = 0;
+    for (var guard = 0; guard < 8; guard++) {
+      font = "700 " + fs.toFixed(1) + "px 'Arial Black',Arial,'PingFang SC',sans-serif";
+      offc.font = font;
+      tw = offc.measureText(text).width + 8;
+      if (tw <= maxW || fs <= 20) break;
+      fs = Math.max(20, fs * maxW / tw);
+    }
+
+    var th = Math.ceil(fs * 1.5);
+    off.width = Math.ceil(tw);
+    off.height = th;
+    offc = off.getContext("2d");
+    offc.font = font;
+    offc.fillStyle = "#fff";
+    offc.textBaseline = "middle";
+    offc.fillText(text, 4, th / 2);
+
+    if (location.search.indexOf("dbg") >= 0) {
+      document.title = "fs=" + fs.toFixed(1) + " tw=" + off.width + " W=" + W + " maxW=" + maxW;
+    }
+
+    var img = offc.getImageData(0, 0, off.width, th).data;
+    var pts = [];
+    var step = W > 700 ? 4 : 3;
+    for (var y = 0; y < th; y += step) {
+      for (var x = 0; x < off.width; x += step) {
+        if (img[(y * off.width + x) * 4 + 3] > 40) {
+          pts.push([(W - off.width) / 2 + x, Math.max(H * 0.08, H * 0.14) + y]);
+        }
+      }
+    }
+    return pts;
+  }
+
+  function updateParticles() {
+    var n = Math.min(targets.length, particles.length);
+    for (var p = 0; p < particles.length; p++) particles[p].inText = false;
+    for (var k = 0; k < n; k++) {
+      var pt = particles[k], tg = targets[k];
+      pt.inText = true;
+      pt.x += (tg[0] - pt.x) * 0.06;
+      pt.y += (tg[1] - pt.y) * 0.06;
+      pt.op = Math.min(1, pt.op + 0.014);
+    }
+    for (var q = 0; q < particles.length; q++) {
+      var pp = particles[q];
+      if (!pp.inText) {
+        pp.op = Math.max(0, pp.op - 0.05);
+        pp.x += (pp.mx - pp.x) * 0.03;
+        pp.y += (pp.my - pp.y) * 0.03;
+      }
+    }
+  }
+
+  function drawPrinceScene(dt, t) {
+    // 夜空渐变
+    var g = ctx.createRadialGradient(W * 0.1, H * 1.3, 0, W * 0.1, H * 1.3, Math.max(W, H) * 1.3);
+    g.addColorStop(0, "rgba(33,39,80,1)");
+    g.addColorStop(1, "#020409");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // 星星
+    for (var i = 0; i < starField.length; i++) {
+      var s = starField[i];
+      var tw = 0.55 + 0.45 * Math.sin(t * 2 + s.p);
+      var c = Math.round(210 * s.b * tw);
+      ctx.fillStyle = "rgb(" + c + "," + c + "," + Math.min(255, c + 20) + ")";
+      ctx.fillRect(s.x * W, s.y * H, 1.4, 1.4);
+    }
+
+    // 小王子剪影
+    if (princeImg && princePos.w > 0) {
+      ctx.drawImage(princeImg, princePos.x, princePos.y, princePos.w, princePos.h);
+    }
+
+    // 粒子文字
+    updateParticles();
+    for (var q2 = 0; q2 < particles.length; q2++) {
+      var pp = particles[q2];
+      if (pp.op > 0.02) {
+        var a = pp.op;
+        ctx.fillStyle = "rgb(" + (226 * a | 0) + "," + (225 * a | 0) + "," + (142 * a | 0) + ")";
+        ctx.fillRect(pp.x, pp.y, pp.size, pp.size);
+      }
+    }
+  }
+
+  // ==================== 跳转 ====================
+  function setHint(text) {
+    hintEl.textContent = text || "";
+    hintEl.classList.toggle("on", !!text);
+  }
+
+  function goScene2() {
+    scene = 2; T0 = now();
+    cvs.style.display = "none";
+    vid.style.display = "block";
+    try {
+      vid.src = ASSETS.video;
+      var pr = vid.play();
+      if (pr && pr.catch) pr.catch(function () {});
+    } catch (e) {}
+    try {
+      bgm.src = ASSETS.audio;
+      bgm.volume = 0.75;
+      var ap = bgm.play();
+      if (ap && ap.catch) ap.catch(function () {});
+    } catch (e) {}
+    setTimeout(function () { setHint("点一下继续"); }, 1600);
+  }
+
+  function goScene3() {
+    scene = 3; T0 = now();
+    setHint("");
+    vid.pause();
+    vid.style.display = "none";
+    cvs.style.display = "block";
+    if (!princeImg) loadPrince();
+    if (particles.length === 0) makeParticles();
+    textIndex = 0;
+    targets = computeTargets(TEXTS[0]);
+    // 调试用：?fast=200 直接把粒子收敛快进 200 帧
+    var fm = /[?&]fast=(\d+)/.exec(location.search);
+    if (fm) {
+      var nf = Math.min(600, parseInt(fm[1], 10));
+      for (var i = 0; i < nf; i++) updateParticles();
+    }
+    setTimeout(function () { setHint("点一下，换一句"); }, 2600);
+  }
+
+  function restartTree() {
+    scene = 1; T0 = now();
+    tree.length = ground.length = heart.length = asm.length = 0;
+    genAll();
+    makeStars();
+    cvs.style.display = "block";
+    vid.style.display = "none";
+    try { bgm.pause(); } catch (e) {}
+    setTimeout(function () {
+      if (scene === 1) setHint("点点树顶那颗心");
+    }, (ASM_TOTAL + 2) * 1000);
+  }
+
+  // ==================== 输入 ====================
+  function tap(x, y) {
+    if (scene === 1) {
+      var elapsed = (now() - T0) / 1000;
+      if (elapsed < ASM_TOTAL + 0.6) return;            // 还没成形
+      var dx = x - heartScreen.x, dy = y - heartScreen.y;
+      if (dx * dx + dy * dy <= heartScreen.r * heartScreen.r) {
+        setHint("");
+        explode(0.6);
+        setTimeout(goScene2, 1300);
+      }
+      return;
+    }
+    if (scene === 2) {
+      if ((now() - T0) < 900) return;                    // 防误触
+      goScene3();
+      return;
+    }
+    if (scene === 3) {
+      textIndex = (textIndex + 1) % TEXTS.length;
+      targets = computeTargets(TEXTS[textIndex]);
+      return;
+    }
+  }
+
+  window.addEventListener("pointerdown", function (e) {
+    tap(e.clientX, e.clientY);
+  }, { passive: true });
+
+  // 树顶炸开（点爱心之后）
+  var expT = 0, exploding = false;
+  function explode(k) {
+    if (exploding) return;
+    exploding = true; expT = 0;
+    for (var i = 0; i < tree.length; i++) {
+      var p = tree[i];
+      if (p.y > TREE_HEIGHT - 3) {
+        p.x += rand(-3, 3) * k; p.y += rand(0, 4) * k; p.z += rand(-3, 3) * k;
+        p.c = [255, 150 + Math.random() * 70, 150 + Math.random() * 70];
+      }
+    }
+    for (var j = 0; j < heart.length; j++) {
+      var h = heart[j];
+      h.x += rand(-1.8, 1.8) * k; h.y += rand(-0.3, 2.0) * k; h.z += rand(-1, 1) * k;
+      h.c = [255, 160 + Math.random() * 65, 175 + Math.random() * 65];
+    }
+    for (var a = 0; a < asm.length; a++) {          // 汇聚表也要跟着改，否则重新成形会"跳回去"
+      var it = asm[a];
+      it.tx = asm[a].tx; // 保持不变，第 1 幕结束后不再用
+    }
+  }
+
+  // ==================== 主循环 ====================
+  var last = 0, angle = 0;
+  function loop(ts) {
+    requestAnimationFrame(loop);
+    if (!last) last = ts;
+    var dt = Math.min((ts - last) / 1000, 0.05);
+    last = ts;
+
+    if (scene === 1) {
+      var elapsed = (ts - T0) / 1000;
+      angle += dt * 0.45;
+      ctx.fillStyle = "#020409";
+      ctx.fillRect(0, 0, W, H);
+      drawTree(angle, elapsed, exploding);
+    } else if (scene === 3) {
+      drawPrinceScene(dt, (ts - T0) / 1000);
+    }
+    // scene 2 交给 <video> 自己放
+  }
+
+  // ==================== 启动 ====================
+  function boot() {
+    makeStars();
+    genAll();
+    loadPrince();
+    if (particles.length === 0) makeParticles();
+    T0 = now();
+    // 调试用：?t=9 表示"已经过了 9 秒"，方便直接看成形后的样子
+    var tm = /[?&]t=([\d.]+)/.exec(location.search);
+    if (tm) T0 = now() - parseFloat(tm[1]) * 1000;
+    requestAnimationFrame(loop);
+
+    // 调试用：?s=2 / ?s=3 直接跳
+    var m = /[?&]s=(\d)/.exec(location.search);
+    if (m) {
+      var s = parseInt(m[1], 10);
+      if (s === 2) goScene2();
+      if (s === 3) goScene3();
+    }
+  }
+  boot();
+})();
+</script>
+</body>
+</html>
